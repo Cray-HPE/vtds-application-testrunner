@@ -23,12 +23,18 @@
 """Layer implementation module for the openchami application.
 
 """
-from tempfile import NamedTemporaryFile
+from os.path import join as path_join
+from tempfile import (
+    TemporaryDirectory,
+    NamedTemporaryFile
+)
 
 from vtds_base import (
     info_msg,
     ContextualError,
     render_template_file,
+    run,
+    log_paths
 )
 from vtds_base.layers.application import ApplicationAPI
 from . import deployment_files
@@ -74,7 +80,7 @@ class Application(ApplicationAPI):
         deployment script(s).
 
         """
-        for source, dest, mode, tag, run in files:
+        for source, dest, mode, tag, run_flag in files:
             info_msg(
                 "copying '%s' to test runner blade(s) '%s'" % (
                     source, dest
@@ -92,7 +98,7 @@ class Application(ApplicationAPI):
                 "chmod'ing '%s' to %s on test runner blade(s)" % (dest, mode)
             )
             connections.run_command(cmd, "chmod-file-%s-on" % tag)
-            if run:
+            if run_flag:
                 cmd = "%s {{ blade_class }} {{ instance }}" % dest
                 info_msg("running '%s' on test runner blade(s)" % cmd)
                 connections.run_command(cmd, "run-%s-on" % tag)
@@ -117,6 +123,27 @@ class Application(ApplicationAPI):
             )
         self.tpl_data = self.__tpl_data()
 
+        # Create the GitHub Deployment keys for use by testers
+        secrets = self.stack.get_provider_api().get_secrets()
+        keys = self.config.get('github_deployment_keys', {})
+        priv_key_secret = keys.get('private', 'github-deploy-key')
+        pub_key_secret = keys.get('public', 'github-deploy-key-public')
+        with TemporaryDirectory() as keydir:
+            priv_key = path_join(keydir, 'id_rsa')
+            pub_key = path_join(keydir, 'id_rsa.pub')
+            run(
+                ['ssh-keygen', '-q', '-N', '', '-t', 'rsa', '-f', priv_key],
+                log_paths(
+                    self.build_dir,
+                    "generate-github-deploy-keys"
+                )
+            )
+            with open(priv_key, 'r', encoding='UTF-8') as data:
+                priv_key_value = data.read()
+            with open(pub_key, 'r', encoding='UTF-8') as data:
+                pub_key_value = data.read()
+            secrets.store(priv_key_secret, priv_key_value)
+            secrets.store(pub_key_secret, pub_key_value)
         # Deploy the application to the cluster
         virtual_blades = self.stack.get_provider_api().get_virtual_blades()
         with virtual_blades.ssh_connect_blades() as connections:
